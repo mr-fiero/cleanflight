@@ -24,7 +24,7 @@
 #include "common/maths.h"
 
 #include "build_config.h"
-#include "platform.h"
+#include <platform.h>
 #include "debug.h"
 
 #include "common/axis.h"
@@ -68,6 +68,7 @@ float fc_acc;
 float smallAngleCosZ = 0;
 
 float magneticDeclination = 0.0f;       // calculated at startup from config
+static bool isAccelUpdatedAtLeastOnce = false;
 
 static imuRuntimeConfig_t *imuRuntimeConfig;
 static pidProfile_t *pidProfile;
@@ -339,9 +340,9 @@ static void imuMahonyAHRSupdate(float dt, float gx, float gy, float gz,
 STATIC_UNIT_TESTED void imuUpdateEulerAngles(void)
 {
     /* Compute pitch/roll angles */
-    attitude.values.roll = lrintf(atan2f(rMat[2][1], rMat[2][2]) * (1800.0f / M_PIf));
-    attitude.values.pitch = lrintf(((0.5f * M_PIf) - acosf(-rMat[2][0])) * (1800.0f / M_PIf));
-    attitude.values.yaw = lrintf((-atan2f(rMat[1][0], rMat[0][0]) * (1800.0f / M_PIf) + magneticDeclination));
+    attitude.values.roll = lrintf(atan2_approx(rMat[2][1], rMat[2][2]) * (1800.0f / M_PIf));
+    attitude.values.pitch = lrintf(((0.5f * M_PIf) - acos_approx(-rMat[2][0])) * (1800.0f / M_PIf));
+    attitude.values.yaw = lrintf((-atan2_approx(rMat[1][0], rMat[0][0]) * (1800.0f / M_PIf) + magneticDeclination));
 
     if (attitude.values.yaw < 0)
         attitude.values.yaw += 3600;
@@ -369,16 +370,18 @@ static bool imuIsAccelerometerHealthy(void)
     return (81 < accMagnitude) && (accMagnitude < 121);
 }
 
+#ifdef MAG
 static bool isMagnetometerHealthy(void)
 {
     return (magADC[X] != 0) && (magADC[Y] != 0) && (magADC[Z] != 0);
 }
+#endif
 
 static void imuCalculateEstimatedAttitude(void)
 {
     static filterStatePt1_t accLPFState[3];
     static uint32_t previousIMUUpdateTime;
-    float rawYawError;
+    float rawYawError = 0;
     int32_t axis;
     bool useAcc = false;
     bool useMag = false;
@@ -401,9 +404,11 @@ static void imuCalculateEstimatedAttitude(void)
         useAcc = true;
     }
 
+#ifdef MAG
     if (sensors(SENSOR_MAG) && isMagnetometerHealthy()) {
         useMag = true;
     }
+#endif
 #if defined(GPS)
     else if (STATE(FIXED_WING) && sensors(SENSOR_GPS) && STATE(GPS_FIX) && GPS_numSat >= 5 && GPS_speed >= 300) {
         // In case of a fixed-wing aircraft we can use GPS course over ground to correct heading
@@ -423,12 +428,19 @@ static void imuCalculateEstimatedAttitude(void)
     imuCalculateAcceleration(deltaT); // rotate acc vector into earth frame
 }
 
-void imuUpdate(rollAndPitchTrims_t *accelerometerTrims)
+void imuUpdateAccelerometer(rollAndPitchTrims_t *accelerometerTrims)
+{
+    if (sensors(SENSOR_ACC)) {
+        updateAccelerationReadings(accelerometerTrims);
+        isAccelUpdatedAtLeastOnce = true;
+    }
+}
+
+void imuUpdateGyroAndAttitude(void)
 {
     gyroUpdate();
 
-    if (sensors(SENSOR_ACC)) {
-        updateAccelerationReadings(accelerometerTrims);
+    if (sensors(SENSOR_ACC) && isAccelUpdatedAtLeastOnce) {
         imuCalculateEstimatedAttitude();
     } else {
         accADC[X] = 0;
@@ -452,7 +464,7 @@ int16_t calculateThrottleAngleCorrection(uint8_t throttle_correction_value)
     if (rMat[2][2] <= 0.015f) {
         return 0;
     }
-    int angle = lrintf(acosf(rMat[2][2]) * throttleAngleScale);
+    int angle = lrintf(acos_approx(rMat[2][2]) * throttleAngleScale);
     if (angle > 900)
         angle = 900;
     return lrintf(throttle_correction_value * sin_approx(angle / (900.0f * M_PIf / 2.0f)));
